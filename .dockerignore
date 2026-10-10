@@ -4,10 +4,7 @@
 .ruff_cache
 __pycache__
 *.pyc
-*.pt
-*.pth
 .env
 .venv
 tests
-*.ipynb
 *.zip
