@@ -29,11 +29,18 @@ jobs:
         python-version: "3.12"
 
 
+    - name: Install PyTorch CPU
+      run: |
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+
     - name: Install dependencies
       run: |
+        pip install --upgrade pip
         pip install -r requirements.txt
+        pip install pytest httpx
 
 
     - name: Run tests
       run: |
-        pytest
+        python -m pytest
