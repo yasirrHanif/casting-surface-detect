@@ -1,6 +1,6 @@
 """API-contract tests (model mocked; actual checkpoint isn't committed)."""
 from io import BytesIO
-
+###
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
