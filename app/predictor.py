@@ -10,96 +10,118 @@ from torchvision import transforms
 from torchvision.models import efficientnet_b3
 
 
+EXPECTED_CLASSES = {
+    "defective": 0,
+    "normal": 1,
+}
+
+
 class Predictor:
-    """Thread-safe for read-only inference after initialization."""
+    """
+    Thread-safe inference wrapper for EfficientNet-B3.
+    """
 
-    def __init__(self, checkpoint_path: str, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        checkpoint_path: str,
+        device: str = "cpu"
+    ) -> None:
 
-        file = Path(checkpoint_path)
+        checkpoint_file = Path(checkpoint_path)
 
-        if not file.is_file():
+        if not checkpoint_file.exists():
             raise FileNotFoundError(
-                f"Model checkpoint not found at '{file}'. "
-                "Copy Kaggle outputs/final_model.pt into models/final_model.pt."
+                f"Model checkpoint not found: {checkpoint_file}"
             )
 
 
         # Load checkpoint
         checkpoint = torch.load(
-            file,
+            checkpoint_file,
             map_location="cpu",
             weights_only=True
         )
 
 
-        if (
-            not isinstance(checkpoint, dict)
-            or "model_state" not in checkpoint
-        ):
+        if not isinstance(checkpoint, dict):
             raise ValueError(
-                "Expected final_model.pt checkpoint dictionary."
+                "Invalid checkpoint format. Expected dictionary."
             )
 
 
-        # Verify class mapping
+        required_keys = [
+            "model_state",
+            "model_name",
+            "class_to_idx",
+            "img_size",
+            "mean",
+            "std",
+        ]
 
-        self.class_to_idx = checkpoint.get(
-            "class_to_idx"
-        )
+
+        missing = [
+            key for key in required_keys
+            if key not in checkpoint
+        ]
 
 
-        if self.class_to_idx != {
-            "defective": 0,
-            "normal": 1
-        }:
+        if missing:
             raise ValueError(
-                f"Unexpected class mapping: {self.class_to_idx!r}"
+                f"Checkpoint missing keys: {missing}"
             )
 
 
-        # Verify architecture
+        # Class mapping check
 
-        if checkpoint.get("model_name") != "EfficientNet-B3":
+        self.class_to_idx = checkpoint["class_to_idx"]
 
+
+        if self.class_to_idx != EXPECTED_CLASSES:
             raise ValueError(
-                "Unexpected architecture. Expected EfficientNet-B3."
+                f"Unexpected class mapping: {self.class_to_idx}"
             )
 
 
-        # Load preprocessing metadata
+        # Architecture check
 
-        size = int(
+        if checkpoint["model_name"] != "EfficientNet-B3":
+            raise ValueError(
+                f"Expected EfficientNet-B3, "
+                f"found {checkpoint['model_name']}"
+            )
+
+
+        # Preprocessing metadata
+
+        img_size = int(
             checkpoint["img_size"]
         )
 
         mean = checkpoint["mean"]
-
         std = checkpoint["std"]
 
 
-        if (
-            not 64 <= size <= 1024
-            or len(mean) != 3
-            or len(std) != 3
+        if not (
+            64 <= img_size <= 1024
+            and len(mean) == 3
+            and len(std) == 3
         ):
             raise ValueError(
                 "Invalid preprocessing metadata."
             )
 
 
-        # Device
-
         self.device = torch.device(device)
 
 
-        # Build EfficientNet-B3 architecture
+        # Build model
 
         self.model = efficientnet_b3(
             weights=None
         )
 
 
-        in_features = (
+        input_features = (
             self.model
             .classifier[1]
             .in_features
@@ -107,7 +129,7 @@ class Predictor:
 
 
         self.model.classifier[1] = nn.Linear(
-            in_features,
+            input_features,
             len(self.class_to_idx)
         )
 
@@ -128,37 +150,39 @@ class Predictor:
 
 
         self.idx_to_class = {
-            v: k
-            for k, v in self.class_to_idx.items()
+            index: label
+            for label, index
+            in self.class_to_idx.items()
         }
 
 
+        # Same transform as validation/test
 
-        # Same preprocessing as validation/test
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize(
+                    (img_size, img_size)
+                ),
 
-        self.transform = transforms.Compose([
+                transforms.ToTensor(),
 
-            transforms.Resize(
-                (size, size)
-            ),
-
-            transforms.ToTensor(),
-
-            transforms.Normalize(
-                mean,
-                std
-            )
-
-        ])
-
+                transforms.Normalize(
+                    mean,
+                    std
+                ),
+            ]
+        )
 
 
-    def predict(self, image: Image.Image) -> dict:
+    def predict(
+        self,
+        image: Image.Image
+    ) -> dict:
 
-        start = perf_counter()
+        start_time = perf_counter()
 
 
-        batch = (
+        tensor = (
             self.transform(
                 image.convert("RGB")
             )
@@ -169,16 +193,16 @@ class Predictor:
 
         with torch.inference_mode():
 
-            outputs = self.model(batch)
+            output = self.model(tensor)
 
             probabilities = torch.softmax(
-                outputs,
+                output,
                 dim=1
             )[0]
 
 
-        index = int(
-            torch.argmax(probabilities).item()
+        predicted_index = int(
+            torch.argmax(probabilities)
         )
 
 
@@ -188,33 +212,32 @@ class Predictor:
         return {
 
             "predicted_class":
-                self.idx_to_class[index],
+                self.idx_to_class[predicted_index],
 
 
             "confidence_score":
                 round(
-                    float(scores[index]),
+                    float(scores[predicted_index]),
                     6
                 ),
 
 
-            "probabilities": {
-
-                label:
-                    round(
-                        float(scores[idx]),
-                        6
-                    )
-
-                for label, idx
-                in self.class_to_idx.items()
-
-            },
+            "probabilities":
+                {
+                    label:
+                        round(
+                            float(scores[index]),
+                            6
+                        )
+                    for label, index
+                    in self.class_to_idx.items()
+                },
 
 
             "inference_time_ms":
                 round(
-                    (perf_counter() - start) * 1000,
+                    (perf_counter() - start_time)
+                    * 1000,
                     2
                 )
         }
